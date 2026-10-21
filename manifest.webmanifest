@@ -1,0 +1,13 @@
+{
+  "name": "LoRAB Receiver",
+  "short_name": "LoRAB",
+  "description": "Receive LoRAB ambient FM backscatter messages with an Airspy, in the browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0a0d16",
+  "theme_color": "#4f46e5",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoRAB Receiver</title>
+  <meta name="description" content="Receive LoRAB ambient FM backscatter messages with an Airspy, right in the browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='4' fill='%234f46e5'/%3E%3Cpath d='M9 9a10 10 0 0 0 0 14M23 9a10 10 0 0 1 0 14M5 5a15.5 15.5 0 0 0 0 22M27 5a15.5 15.5 0 0 1 0 22' stroke='%234f46e5' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#4f46e5">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="4"/><path d="M9 9a10 10 0 0 0 0 14M23 9a10 10 0 0 1 0 14M5 5a15.5 15.5 0 0 0 0 22M27 5a15.5 15.5 0 0 1 0 22"/></svg>
+      <span>LoRAB Receiver</span>
+    </div>
+    <ol class="steps" aria-label="Progress">
+      <li data-step="connect">Connect</li>
+      <li data-step="scan">Choose station</li>
+      <li data-step="listen">Listen</li>
+    </ol>
+    <div class="topbar-right">
+      <span id="devicePill" class="pill">No radio</span>
+      <button id="settingsBtn" class="btn ghost" aria-controls="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        Settings
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Step 1: connect -->
+    <section id="viewConnect" class="view">
+      <div class="hero card">
+        <h1>Read your LoRAB tag over FM radio</h1>
+        <p class="lead">The tag hides its messages in the FM stations around it. Plug in an Airspy and press
+          <b>Start</b>: the page finds the FM stations, finds your tag and starts listening on its own.
+          Everything runs in this page; there is nothing to install.</p>
+        <div class="hero-actions">
+          <button id="connectBtn" class="btn primary big">Start</button>
+          <button id="demoBtn" class="btn big">Try the demo</button>
+        </div>
+        <p class="muted small">The first time, Chrome asks which device to use: pick <b>AIRSPY</b>. Next time it
+          starts by itself when the Airspy is plugged in.</p>
+        <p id="connectError" class="alert" hidden></p>
+        <details class="help">
+          <summary>Requirements and troubleshooting</summary>
+          <ul>
+            <li><b>Browser:</b> Chrome, Edge or Opera (desktop or Android). Firefox and Safari can't talk to USB devices.</li>
+            <li><b>Address:</b> the page must be opened over <code>https://</code> or <code>http://localhost</code>.</li>
+            <li><b>Linux:</b> give your user access to the Airspy once, then replug it:
+              <pre id="udevRule">echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60a1", MODE="0666"' | sudo tee /etc/udev/rules.d/52-airspy.rules
+sudo udevadm control --reload-rules</pre></li>
+            <li><b>Windows:</b> the Airspy must use the WinUSB driver (the official Airspy driver, or install WinUSB with Zadig).</li>
+            <li><b>macOS, ChromeOS, Android:</b> nothing to install.</li>
+            <li>Close other radio programs (GNU Radio, SDR#, SDR++) first: only one program can use the Airspy at a time.</li>
+          </ul>
+        </details>
+      </div>
+    </section>
+
+    <!-- Step 2: stations -->
+    <section id="viewScan" class="view" hidden>
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>FM stations near you</h2>
+            <p class="muted">Pick one to listen to, or let <b>Find my tag</b> check them all. Nearby stations are combined automatically to cut errors.</p>
+          </div>
+          <div class="head-actions">
+            <button id="findBtn" class="btn primary">Find my tag</button>
+            <button id="scanBtn" class="btn">Scan again</button>
+          </div>
+        </div>
+        <div id="scanProgress" class="progress" hidden><div class="bar"></div><span class="progress-text"></span></div>
+        <div id="bestBar" class="best-bar" hidden>
+          <span id="bestText"></span>
+          <button id="bestBtn" class="btn primary small">Listen</button>
+        </div>
+        <canvas id="bandCanvas" class="plot band" aria-label="FM band overview"></canvas>
+        <div id="stationGrid" class="station-grid"></div>
+        <p id="noStations" class="muted center" hidden>No stations found. Check the antenna, then scan again.</p>
+        <form id="tuneForm" class="tune-row">
+          <label for="tuneFreq">Station not listed? Tune to</label>
+          <input id="tuneFreq" type="number" min="87.5" max="108" step="0.05" placeholder="98.8" required>
+          <span>MHz</span>
+          <button class="btn small" type="submit">Listen</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Step 3: listen -->
+    <section id="viewListen" class="view" hidden>
+      <div class="listen-head">
+        <div>
+          <h2 id="listenTitle">Listening</h2>
+          <div id="listenSub" class="chips"></div>
+        </div>
+        <div class="listen-actions">
+          <div class="audio-ctl">
+            <button id="audioBtn" class="btn" aria-pressed="false" title="Play the station's audio (mono)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path id="audioWaves" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></svg>
+              <span>Play audio</span>
+            </button>
+            <input id="volume" type="range" min="0" max="1" step="0.01" value="0.7" aria-label="Volume">
+          </div>
+          <button id="changeBtn" class="btn">Change station</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card message-card span2">
+          <div class="label">Latest message</div>
+          <div id="msgText" class="msg waiting"><span class="dot"></span>Waiting for the tag…</div>
+          <div id="msgMeta" class="meta"></div>
+          <div id="awgnBadge" class="awgn-badge" hidden></div>
+        </div>
+        <div class="card stats">
+          <div class="stat"><span class="label">Decoded</span><b id="statDecoded">0</b><small id="statSeen">of 0 frames</small></div>
+          <div class="stat"><span class="label">Signal</span><b id="statSnr">–</b><small>in-band SNR</small>
+            <canvas id="snrSpark" class="spark" aria-label="SNR of recent frames"></canvas></div>
+          <div class="stat"><span class="label">Timing</span><b id="statLock">Searching</b><small id="statLoad">CPU –</small></div>
+        </div>
+
+        <div class="card span3">
+          <div class="card-head slim">
+            <h3>Spectrum</h3>
+            <div class="legend"><span class="key main"></span>Main station <span class="key helper"></span>Helper stations</div>
+          </div>
+          <canvas id="specCanvas" class="plot spec" aria-label="Spectrum"></canvas>
+        </div>
+
+        <div class="card span3">
+          <div class="card-head slim">
+            <h3 id="chirpTitle">Tag chirps</h3>
+            <span class="muted small">Each diagonal line is one chirp. A frame starts with 8 falling and 3 rising chirps.</span>
+          </div>
+          <canvas id="chirpCanvas" class="plot chirps" width="936" height="64" aria-label="Chirp waterfall"></canvas>
+        </div>
+
+        <div class="card">
+          <h3>Stations</h3>
+          <ul id="stationRows" class="station-rows"></ul>
+        </div>
+
+        <div class="card span2">
+          <div class="card-head slim">
+            <h3>Packets</h3>
+            <span class="muted small">Click a packet to look inside.</span>
+            <button id="csvBtn" class="btn small push">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table class="packets">
+              <thead><tr><th>Time</th><th>Message</th><th>SNR</th><th>Stations</th><th>Frames</th></tr></thead>
+              <tbody id="packetRows"></tbody>
+            </table>
+          </div>
+          <p id="noPackets" class="muted small">Frames appear here as they arrive.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <!-- Packet inspector -->
+  <dialog id="inspector" class="inspector">
+    <div class="drawer-head">
+      <div>
+        <h2 id="insTitle">Packet</h2>
+        <div id="insSub" class="muted small"></div>
+      </div>
+      <button id="insClose" class="btn ghost" aria-label="Close">✕</button>
+    </div>
+    <div class="ins-grid">
+      <div>
+        <canvas id="insMap" class="plot ins-map" aria-label="Dechirped symbols of this packet"></canvas>
+        <p class="muted small ins-caption">Every column is one chirp after de-chirping; its bright dot is the symbol it
+          carries. <span class="key-dot ok"></span>expected symbol, <span class="key-dot bad"></span>symbol the radio
+          got wrong. The first columns are the preamble.</p>
+      </div>
+      <dl id="insFacts" class="facts"></dl>
+    </div>
+  </dialog>
+
+  <!-- Settings drawer -->
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="settings" class="drawer" aria-label="Settings" hidden>
+    <div class="drawer-head">
+      <h2>Settings</h2>
+      <button id="closeSettings" class="btn ghost" aria-label="Close settings">✕</button>
+    </div>
+
+    <section>
+      <h3>General</h3>
+      <label class="row"><span>Start automatically<small>After connecting: scan, find the tag and listen to the best station.</small></span>
+        <input id="setAuto" type="checkbox" class="switch"></label>
+    </section>
+
+    <section>
+      <h3>Radio</h3>
+      <label class="row"><span>Bandwidth<small>Wider sees more stations to combine, but needs more CPU.</small></span>
+        <select id="setRate"></select></label>
+      <label class="row"><span>Automatic gain</span><input id="setAgc" type="checkbox" class="switch"></label>
+      <label class="row" id="gainRow"><span>Gain <output id="gainOut"></output></span>
+        <input id="setGain" type="range" min="0" max="21" step="1"></label>
+      <label class="row"><span>Audio de-emphasis<small>50 µs in Europe, Asia and Africa; 75 µs in the Americas.</small></span>
+        <select id="setDeemph"><option value="50">50 µs</option><option value="75">75 µs</option></select></label>
+      <button id="disconnectBtn" class="btn small">Disconnect radio</button>
+    </section>
+
+    <section>
+      <h3>Tag signal</h3>
+      <p class="muted small">These must match the tag firmware (MyosaBoard/main/main.c).</p>
+      <label class="row"><span>Spreading factor<small>Higher = longer range, slower.</small></span>
+        <select id="setSf"><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select></label>
+      <label class="row"><span>Chirp bandwidth</span>
+        <select id="setBw"><option value="5000">5 kHz</option><option value="10000">10 kHz</option><option value="12500">12.5 kHz</option><option value="25000">25 kHz</option><option value="62500">62.5 kHz</option></select></label>
+      <label class="row"><span>Subcarrier centre<small>kHz above the FM carrier. 48 = chirps at 43–53 kHz (inside the stereo band, longest range). Above 60 kHz the receiver widens its channel automatically.</small></span>
+        <input id="setSub" type="number" min="5" max="200" step="0.25"></label>
+      <label class="row"><span>Message length<small>Bytes per frame.</small></span>
+        <input id="setLen" type="number" min="1" max="64" step="1"></label>
+      <label class="row"><span>Frame period<small>Seconds between frames.</small></span>
+        <input id="setPeriod" type="number" min="1" max="120" step="0.5"></label>
+      <label class="row"><span>Preamble chirps<small>Falling, then rising.</small></span>
+        <span class="pair"><input id="setDown" type="number" min="4" max="16"><input id="setUp" type="number" min="1" max="8"></span></label>
+      <p id="frameInfo" class="info"></p>
+      <button id="copyFwBtn" class="btn small">Copy firmware settings</button>
+    </section>
+
+    <section>
+      <h3>Error reduction</h3>
+      <label class="row"><span>Helper stations<small>Extra stations combined with the main one.</small></span>
+        <input id="setHelpers" type="number" min="0" max="6" step="1"></label>
+      <label class="row"><span>Combine repeated frames<small>Up to this many frames are added up when one alone fails.</small></span>
+        <input id="setCombine" type="number" min="1" max="8" step="1"></label>
+    </section>
+
+    <section>
+      <h3>Noise test</h3>
+      <label class="row"><span>Add noise (AWGN)<small>Measures the live tag power, then adds noise so every station has this SNR.</small></span>
+        <input id="setAwgnOn" type="checkbox" class="switch"></label>
+      <label class="row"><span>In-band SNR <output id="awgnOut"></output></span>
+        <input id="setAwgn" type="range" min="-30" max="10" step="0.5"></label>
+    </section>
+
+    <button id="resetBtn" class="btn ghost small">Reset to defaults</button>
+  </aside>
+</body>
+</html>
