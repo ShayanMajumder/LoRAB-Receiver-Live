@@ -247,6 +247,29 @@ export class AirspyIQ {
   }
 }
 
+/** RTL-SDR uint8 I/Q pairs to interleaved float IQ, with the ADC's DC offset removed. */
+export class RtlIQ {
+  constructor() {
+    this.dc = [0, 0];
+  }
+
+  process(raw) {
+    const len = raw.length & ~1, out = new Float32Array(len), k = 1 / 127.5;
+    let di = this.dc[0], dq = this.dc[1], si = 0, sq = 0;
+    for (let i = 0; i < len; i += 2) {
+      const a = (raw[i] - 127.5) * k, b = (raw[i + 1] - 127.5) * k;
+      si += a;
+      sq += b;
+      out[i] = a - di;
+      out[i + 1] = b - dq;
+    }
+    // Block mean, smoothed across blocks (one block is 65 ms at 2 MS/s)
+    const n = len >> 1 || 1;
+    this.dc = [di + 0.3 * (si / n - di), dq + 0.3 * (sq / n - dq)];
+    return out;
+  }
+}
+
 // ===================================================================== spectrum
 /** Averaged, fft-shifted power spectrum (dB) of interleaved complex samples. */
 export class PowerSpectrum {

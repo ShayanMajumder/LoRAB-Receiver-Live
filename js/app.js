@@ -1,6 +1,6 @@
-// LoRAB Receiver web app: UI, Airspy control, and the bridge to the DSP workers.
+// LoRAB Receiver web app: UI, radio control (Airspy or RTL-SDR), and the bridge to the DSP workers.
 
-import { Airspy } from "./airspy.js";
+import { requestRadio, pairedRadio, isRadio } from "./radio.js";
 import { frameLayout, channelRateFor, AWGN_OFF } from "./dsp.js";
 
 const FM_LOW = 87.5e6, FM_HIGH = 108e6;
@@ -79,7 +79,7 @@ function request(msg, type, timeout = 8000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       waiters = waiters.filter((w) => w !== check);
-      reject(new Error("No samples from the radio. Replug the Airspy and try again."));
+      reject(new Error("No samples from the radio. Replug it and try again."));
     }, timeout);
     const check = (m) => {
       if (m.type !== type) return false;
@@ -143,15 +143,18 @@ function toast(text, ms = 4500) {
 }
 
 // ======================================================================= connect
-function explain(e) {
+function explain(e, dev = S.dev || S.opening) {
   const msg = `${e.name || ""} ${e.message || e}`;
+  const rtl = dev?.format === "rtl", name = rtl ? "RTL-SDR" : dev ? "Airspy" : "radio";
   if (/access|security|permission|LIBUSB_ERROR_ACCESS/i.test(msg))
-    return "The browser isn't allowed to open the Airspy. On Linux, add the udev rule below, replug the Airspy and try again.";
+    return `The browser isn't allowed to open the ${name}. On Linux, add the udev rule below, replug it and try again.`;
   if (/claim|busy|InvalidState/i.test(msg))
-    return "The Airspy is in use by another program or tab. Close GNU Radio, SDR++, SDR# or other LoRAB tabs and try again.";
+    return rtl
+      ? "The RTL-SDR is in use. Close other radio programs and LoRAB tabs. On Linux, the TV-tuner driver may hold it: run the blacklist command below, then replug it."
+      : `The ${name} is in use by another program or tab. Close GNU Radio, SDR++, SDR# or other LoRAB tabs and try again.`;
   if (/open|NetworkError/i.test(msg))
-    return "The Airspy couldn't be opened. On Windows it needs the WinUSB driver (see below); otherwise replug it and try again.";
-  return `Couldn't start the Airspy: ${e.message || e}`;
+    return `The ${name} couldn't be opened. On Windows it needs the WinUSB driver (see below); otherwise replug it and try again.`;
+  return `Couldn't start the ${name}: ${e.message || e}`;
 }
 
 async function connect(paired) {
@@ -173,8 +176,9 @@ async function openRadio(paired) {
     return;
   }
   try {
-    const dev = paired ? await Airspy.paired() : await Airspy.request();
+    const dev = paired ? await pairedRadio() : await requestRadio();
     if (!dev) return;
+    S.opening = dev;
     await dev.open();
     S.dev = dev;
     S.demo = false;
@@ -182,7 +186,7 @@ async function openRadio(paired) {
     S.fs = S.rates.includes(S.set.rate) ? S.set.rate : S.rates[0];
     await dev.setSampleRate(S.fs);
     await applyGain();
-    worker.postMessage({ type: "reset", fs: S.fs });
+    worker.postMessage({ type: "reset", fs: S.fs, format: dev.format });
     await startStream();
     setPill(dev.name, "on");
     fillRateSelect();
@@ -192,8 +196,10 @@ async function openRadio(paired) {
     if (e.name === "NotFoundError") return;   // Chooser closed
     console.error(e);
     showConnectError(explain(e));
-    try { await S.dev?.close(); } catch { /* ignore */ }
+    try { await (S.dev || S.opening)?.close(); } catch { /* ignore */ }
     S.dev = null;
+  } finally {
+    S.opening = null;
   }
 }
 
@@ -219,7 +225,7 @@ function onDeviceLost() {
   S.abortFind = true;
   setPill("No radio");
   show("connect");
-  showConnectError("The Airspy stopped responding or was unplugged. Plug it back in and connect again.");
+  showConnectError("The radio stopped responding or was unplugged. Plug it back in and connect again.");
 }
 
 async function disconnect() {
@@ -267,7 +273,7 @@ async function applyGain() {
 async function refreshConnectButton() {
   if (!("usb" in navigator)) return;
   try {
-    $("#connectBtn").dataset.paired = (await Airspy.paired()) ? "1" : "";
+    $("#connectBtn").dataset.paired = (await pairedRadio()) ? "1" : "";
   } catch { /* ignore */ }
 }
 
@@ -1032,7 +1038,7 @@ async function changeRate(rate) {
     try {
       await S.dev.stop();
       await S.dev.setSampleRate(rate);
-      worker.postMessage({ type: "reset", fs: rate });
+      worker.postMessage({ type: "reset", fs: rate, format: S.dev.format });
       await startStream();
     } catch (e) {
       toast(explain(e));
@@ -1154,12 +1160,12 @@ show("connect");
 if ("usb" in navigator) {
   refreshConnectButton();
   navigator.usb.addEventListener("disconnect", (e) => { if (S.dev && e.device === S.dev.dev) onDeviceLost(); });
-  // Plug and play: an Airspy this site may already use starts by itself
-  navigator.usb.addEventListener("connect", () => { if (!S.dev && !S.demo) connect(true); });
-  Airspy.paired().then((d) => { if (d && !S.dev && !S.demo) connect(true); }).catch(() => {});
+  // Plug and play: a radio this site may already use starts by itself
+  navigator.usb.addEventListener("connect", (e) => { if (!S.dev && !S.demo && isRadio(e.device)) connect(true); });
+  pairedRadio().then((d) => { if (d && !S.dev && !S.demo) connect(true); }).catch(() => {});
 } else {
   showConnectError(window.isSecureContext
-    ? "This browser can't talk to USB devices. Use Chrome, Edge or Opera to connect an Airspy, or try the demo."
+    ? "This browser can't talk to USB devices. Use Chrome, Edge or Opera to connect a radio, or try the demo."
     : "USB needs a secure page. Open this site over https:// or http://localhost, or try the demo.");
 }
 

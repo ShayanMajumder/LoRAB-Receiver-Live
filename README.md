@@ -2,7 +2,7 @@
 
 **Open it: https://shayanmajumder.github.io/LoRAB-Receiver-Live/**
 
-Receive messages from a LoRAB ambient-backscatter tag with an Airspy, right in
+Receive messages from a LoRAB ambient-backscatter tag with an Airspy or an RTL-SDR, right in
 your browser. The tag hides its messages in the FM radio stations around it;
 this page finds the stations, finds the tag and decodes it. There is nothing
 to install.
@@ -10,12 +10,12 @@ to install.
 ## Use it
 
 1. Open the page in **Chrome or Edge** (desktop or Android).
-2. Plug in the **Airspy** (R2 or Mini) with an FM antenna.
-3. Press **Start**. The first time, Chrome asks which device to use: pick **AIRSPY**.
+2. Plug in the **Airspy** (R2 or Mini) or an **RTL-SDR** (R820T/R828D dongles, e.g. RTL-SDR Blog V3/V4) with an FM antenna.
+3. Press **Start**. The first time, Chrome asks which device to use: pick **AIRSPY**, or **RTL2838UHIDIR** / **Blog V4** for an RTL-SDR.
 
 That's it. The page scans the FM band, checks every station for the tag,
 and starts listening on the best one. Next time it starts by itself as soon as
-the Airspy is plugged in.
+the radio is plugged in.
 
 No Airspy? Press **Try the demo**: it simulates a radio and a tag.
 
@@ -35,16 +35,20 @@ No Airspy? Press **Try the demo**: it simulates a radio and a tag.
 | | |
 |---|---|
 | Firefox, Safari | Not supported (no WebUSB). Use Chrome or Edge. |
-| Linux | Allow access to the Airspy once, then replug it (command below). |
-| Windows | The Airspy needs the WinUSB driver: the official Airspy driver, or WinUSB installed with [Zadig](https://zadig.akeo.ie/). |
+| Linux | Allow access to the radio once, then replug it (commands below). |
+| Windows | The radio needs the WinUSB driver: for an Airspy the official driver; for an RTL-SDR, WinUSB installed with [Zadig](https://zadig.akeo.ie/). |
 | macOS, ChromeOS, Android | Nothing to install. |
-| "in use by another program" | Close GNU Radio, SDR++, SDR# or another tab using the Airspy. |
+| "in use by another program" | Close GNU Radio, SDR++, SDR# or another tab using the radio. |
 
 Linux access rule:
 
 ```bash
-echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60a1", MODE="0666"' | sudo tee /etc/udev/rules.d/52-airspy.rules
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60a1", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="283[28]", MODE="0666"' | sudo tee /etc/udev/rules.d/52-lorab-radios.rules
 sudo udevadm control --reload-rules
+# RTL-SDR only: keep the TV-tuner driver off it
+echo 'blacklist dvb_usb_rtl28xxu' | sudo tee /etc/modprobe.d/blacklist-rtlsdr.conf
+sudo modprobe -r dvb_usb_rtl28xxu
 ```
 
 ## Settings
@@ -57,7 +61,7 @@ tag's firmware; **Copy firmware settings** gives the matching lines.
 
 ## How it works
 
-The page drives the Airspy over WebUSB (the same USB requests as libairspy)
+The page drives the radio over WebUSB (the same USB requests as libairspy and librtlsdr)
 and does all the signal processing in JavaScript Web Workers, one per station
 on separate CPU cores:
 

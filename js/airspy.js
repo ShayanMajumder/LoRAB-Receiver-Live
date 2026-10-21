@@ -43,15 +43,20 @@ export class Airspy {
     return new Airspy(await usb.requestDevice({ filters: Airspy.filters }));
   }
 
+  static matches(d) {
+    return d.vendorId === AIRSPY_VID && d.productId === AIRSPY_PID;
+  }
+
   /** An Airspy the user already granted to this site, or null. */
   static async paired(usb = globalThis.navigator?.usb) {
     const devs = await usb.getDevices();
-    const d = devs.find((d) => d.vendorId === AIRSPY_VID && d.productId === AIRSPY_PID);
+    const d = devs.find((d) => Airspy.matches(d));
     return d ? new Airspy(d) : null;
   }
 
   constructor(device) {
     this.dev = device;
+    this.format = "airspy";              // uint16 real samples at twice the sample rate
     this.streaming = false;
     this.sampleRates = [];
     this.sampleRate = 0;

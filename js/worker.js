@@ -1,4 +1,4 @@
-// Radio worker: Airspy raw samples in; scan results, spectrum, chirp
+// Radio worker: raw radio samples (Airspy or RTL-SDR) in; scan results, spectrum, chirp
 // waterfall, station names and decoded frames out.
 //
 // IQ conversion, scanning and the frame decoder run here. Each station's
@@ -6,7 +6,7 @@
 // hands us one port per station worker ("pool"), so stations decode in
 // parallel on separate cores.
 
-import { AirspyIQ, PowerSpectrum, findStations, LorabReceiver, FFT, frameLayout, AWGN_OFF } from "./dsp.js";
+import { AirspyIQ, RtlIQ, PowerSpectrum, findStations, LorabReceiver, FFT, frameLayout, AWGN_OFF } from "./dsp.js";
 import { demoSpectrum } from "./demo.js";
 
 const WF_BINS = 64;            // Chirp waterfall FFT size
@@ -15,6 +15,7 @@ const MAX_INFLIGHT = 40;       // IQ blocks out at the station workers before we
 const DEMO_TICK_MS = 50;
 
 let fs = 3e6;
+let format = "airspy";                    // "airspy": uint16 real samples; "rtl": uint8 I/Q
 let iq = new AirspyIQ();
 let scan = null;
 let listen = null;
@@ -34,7 +35,8 @@ onmessage = ({ data: m }) => {
         break;
       case "reset":
         fs = m.fs;
-        iq = new AirspyIQ();
+        format = m.format || "airspy";
+        iq = format === "rtl" ? new RtlIQ() : new AirspyIQ();
         scan = null;
         stopListen();
         demo = false;
@@ -44,7 +46,7 @@ onmessage = ({ data: m }) => {
         fs = m.fs;
         break;
       case "raw":
-        onRaw(new Uint16Array(m.buf));
+        onRaw(format === "rtl" ? new Uint8Array(m.buf) : new Uint16Array(m.buf));
         break;
       case "scanStep":
         scan = { centerHz: m.centerHz, skip: m.skip, take: m.take, usable: m.usable, ps: new PowerSpectrum(4096) };

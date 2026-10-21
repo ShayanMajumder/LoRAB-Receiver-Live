@@ -1,10 +1,10 @@
 // Service worker: makes the app installable and lets it open offline.
 // Network first, so a published update is picked up on the next load.
 
-const CACHE = "lorab-receiver-v3";
+const CACHE = "lorab-receiver-v4";
 const SHELL = [
   "./", "index.html", "style.css", "manifest.webmanifest", "icon.svg",
-  "js/app.js", "js/airspy.js", "js/dsp.js", "js/demo.js",
+  "js/app.js", "js/radio.js", "js/airspy.js", "js/rtlsdr.js", "js/dsp.js", "js/demo.js",
   "js/worker.js", "js/station-worker.js", "js/station-core.js",
 ];
 
