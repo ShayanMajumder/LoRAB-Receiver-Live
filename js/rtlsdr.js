@@ -301,6 +301,7 @@ export class RtlSdr {
     this.dev = device;
     this.format = "rtl";                 // uint8 I/Q pairs
     this.streaming = false;
+    this.run = 0;                        // Streaming session; transfer loops of an older one exit
     this.sampleRates = [2000000, 2250000];   // 2.5 MS/s gave symbol errors in tests; 3 MS/s drops samples
     this.sampleRate = 0;
     this.frequency = 0;
@@ -444,16 +445,17 @@ export class RtlSdr {
     await this.writeReg(BLOCK.USB, USB_EPA_CTL, 0x1002, 2);   // Reset the buffer
     await this.writeReg(BLOCK.USB, USB_EPA_CTL, 0x0000, 2);
     this.streaming = true;
+    const run = ++this.run, live = () => this.streaming && this.run === run;
     const loop = async () => {
-      while (this.streaming) {
+      while (live()) {
         let r;
         try {
           r = await this.dev.transferIn(1, TRANSFER_BYTES);
         } catch (e) {
-          if (this.streaming) { this.streaming = false; onError?.(e); }
+          if (live()) { this.streaming = false; onError?.(e); }
           return;
         }
-        if (!this.streaming) return;
+        if (!live()) return;
         if (r.status === "ok" && r.data && r.data.byteLength) {
           const v = r.data;
           onData(v.byteOffset === 0 && v.byteLength === v.buffer.byteLength
@@ -470,7 +472,8 @@ export class RtlSdr {
     if (!this.streaming) return;
     this.streaming = false;
     try { await this.dev.releaseInterface(0); await this.dev.claimInterface(0); } catch { /* unplugged */ }
-    await Promise.allSettled(this._loops || []);
+    // The aborted transfers normally end at once; never wait forever for one the OS holds on to
+    await Promise.race([Promise.allSettled(this._loops || []), new Promise((r) => setTimeout(r, 2000))]);
   }
 
   // -------------------------------------------------------------- register access (librtlsdr)

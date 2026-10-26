@@ -12,6 +12,7 @@ import { demoSpectrum } from "./demo.js";
 const WF_BINS = 64;            // Chirp waterfall FFT size
 const POST_MS = 100;           // Display update interval
 const MAX_INFLIGHT = 40;       // IQ blocks out at the station workers before we drop
+const STALL_MS = 2000;         // A block a station worker never answers is skipped after this
 const DEMO_TICK_MS = 50;
 
 let fs = 3e6;
@@ -46,7 +47,11 @@ onmessage = ({ data: m }) => {
         fs = m.fs;
         break;
       case "raw":
-        onRaw(format === "rtl" ? new Uint8Array(m.buf) : new Uint16Array(m.buf));
+        try {
+          onRaw(format === "rtl" ? new Uint8Array(m.buf) : new Uint16Array(m.buf));
+        } finally {
+          post({ type: "ack", bytes: m.buf.byteLength });   // Lets the main thread send more
+        }
         break;
       case "scanStep":
         scan = { centerHz: m.centerHz, skip: m.skip, take: m.take, usable: m.usable, ps: new PowerSpectrum(4096) };
@@ -90,13 +95,35 @@ function onRaw(raw) {
 /** Sends one block (IQ, or a demo tick) to every station worker in use. */
 function sendBlock(msg, buffer) {
   const L = listen;
-  if (L.pending.size >= MAX_INFLIGHT) { load.dropped++; return; }
+  if (L.pending.size >= MAX_INFLIGHT && !skipStalled(L)) { load.dropped++; return; }
   const s = seq++;
-  L.pending.set(s, { outs: new Array(L.n), got: 0 });
+  L.pending.set(s, { outs: new Array(L.n), got: 0, t: performance.now() });
   L.used.forEach((p, i) => {
     const last = i === L.used.length - 1;
     p.postMessage({ ...msg, seq: s }, last && buffer ? [buffer] : []);
   });
+}
+
+/**
+ * Gives up on the oldest block if a station worker never answered it (it
+ * failed on it), so the blocks behind it flow again instead of all being
+ * dropped. True if there is room again.
+ */
+function skipStalled(L) {
+  const head = L.pending.get(L.nextSeq);
+  if (!head || performance.now() - head.t < STALL_MS) return false;
+  L.pending.delete(L.nextSeq++);
+  deliver(L);
+  return L.pending.size < MAX_INFLIGHT;
+}
+
+/** Feeds the complete blocks, in order, to the decoder and the waterfall. */
+function deliver(L) {
+  for (let q = L.pending.get(L.nextSeq); q && q.got === L.n; q = L.pending.get(L.nextSeq)) {
+    L.pending.delete(L.nextSeq++);
+    L.rx.push(q.outs);
+    waterfall(q.outs[0]);
+  }
 }
 
 function report() {
@@ -170,18 +197,18 @@ function stopListen() {
 function onStation(m) {
   if (m.type === "rds") { post({ type: "rds", freq: m.freq, ps: m.ps, pi: m.pi }); return; }
   if (m.type === "audio") { if (listen?.audio) post({ type: "audio", pcm: m.pcm }, [m.pcm.buffer]); return; }
+  if (m.type === "error") { post(m); return; }
   if (m.type !== "bb") return;
   load.stations += m.busy;
   const L = listen, p = L?.pending.get(m.seq);
-  if (!p) return;                                  // From a previous session
+  if (!p) return;                                  // From a previous session, or skipped
   for (const o of m.outs) p.outs[o.idx] = o.bb;
   p.got += m.outs.length;
-  // Deliver complete blocks in order
   const t0 = performance.now();
-  for (let q = L.pending.get(L.nextSeq); q && q.got === L.n; q = L.pending.get(L.nextSeq)) {
-    L.pending.delete(L.nextSeq++);
-    L.rx.push(q.outs);
-    waterfall(q.outs[0]);
+  try {
+    deliver(L);
+  } catch (e) {
+    post({ type: "error", message: e.message });
   }
   load.busy += performance.now() - t0;
   const now = performance.now();

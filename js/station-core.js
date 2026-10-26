@@ -20,6 +20,14 @@ export class StationCore {
   }
 
   handle(m) {
+    try {
+      this._handle(m);
+    } catch (e) {
+      this.port.postMessage({ type: "error", message: e.message });   // The radio worker skips the block
+    }
+  }
+
+  _handle(m) {
     const t0 = performance.now();
     switch (m.type) {
       case "start": {

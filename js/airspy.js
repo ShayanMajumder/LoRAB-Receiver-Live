@@ -58,6 +58,7 @@ export class Airspy {
     this.dev = device;
     this.format = "airspy";              // uint16 real samples at twice the sample rate
     this.streaming = false;
+    this.run = 0;                        // Streaming session; transfer loops of an older one exit
     this.sampleRates = [];
     this.sampleRate = 0;
   }
@@ -143,16 +144,17 @@ export class Airspy {
     await this.dev.clearHalt("in", 1);
     await this.setReceiverMode(1);
     this.streaming = true;
+    const run = ++this.run, live = () => this.streaming && this.run === run;
     const loop = async () => {
-      while (this.streaming) {
+      while (live()) {
         let r;
         try {
           r = await this.dev.transferIn(1, TRANSFER_BYTES);
         } catch (e) {
-          if (this.streaming) { this.streaming = false; onError?.(e); }
+          if (live()) { this.streaming = false; onError?.(e); }
           return;
         }
-        if (!this.streaming) return;
+        if (!live()) return;
         if (r.status === "ok" && r.data && r.data.byteLength) {
           const v = r.data;
           const buf = v.byteOffset === 0 && v.byteLength === v.buffer.byteLength
@@ -172,7 +174,8 @@ export class Airspy {
     try { await this.setReceiverMode(0); } catch { /* unplugged */ }
     // Releasing the interface aborts the transfers still queued
     try { await this.dev.releaseInterface(0); await this.dev.claimInterface(0); } catch { /* unplugged */ }
-    await Promise.allSettled(this._loops || []);
+    // The aborted transfers normally end at once; never wait forever for one the OS holds on to
+    await Promise.race([Promise.allSettled(this._loops || []), new Promise((r) => setTimeout(r, 2000))]);
   }
 
   async _in(request, value, index, length) {

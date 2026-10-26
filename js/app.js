@@ -6,7 +6,9 @@ import { frameLayout, channelRateFor, AWGN_OFF } from "./dsp.js";
 const FM_LOW = 87.5e6, FM_HIGH = 108e6;
 const USABLE = 0.42;              // Usable fraction of the sample rate on each side of the centre
 const CHANNEL_HALF = 115e3;       // A station needs this much on each side of its carrier
-const MAX_PENDING = 48;           // USB buffers queued for the worker before we drop (about 1 s)
+const RTL_OFFSET = 250e3;         // RTL-SDR: main station this far above the centre, clear of the DC spike
+const MAX_QUEUED_S = 1;           // Seconds of raw samples queued for the worker before we drop
+const STREAM_STALL_MS = 4000;     // No samples for this long: restart the radio's stream
 const STORE = "lorab-settings", NAMES = "lorab-names";
 
 const DEFAULTS = {
@@ -35,12 +37,17 @@ const S = {
   stations: [],
   band: [],
   view: "connect",
+  session: 0,                    // Bumped by each scan, tag search or listen (see newSession)
+  listenGen: 0,                  // Bumped by each (re)start of listening
   scanning: false,
   finding: false,
   probe: null,
+  endProbe: null,
   listen: null,
-  pending: 0,
+  queued: 0,                     // Raw bytes sent to the worker and not yet acknowledged
   dropped: 0,
+  lastData: 0,                   // When the radio last delivered samples
+  streamBusy: false,             // The stream is being stopped or restarted
 };
 
 // ======================================================================= workers
@@ -52,6 +59,7 @@ worker.onmessage = ({ data: m }) => {
   switch (m.type) {
     case "frame": onFrame(m.ev); break;
     case "display": onDisplay(m); break;
+    case "ack": S.queued = Math.max(0, S.queued - m.bytes); break;
     case "load": onLoad(m); break;
     case "rds": onRds(m); break;
     case "audio": playAudio(m.pcm); break;
@@ -75,21 +83,44 @@ worker.onerror = (e) => toast(`Processing error: ${e.message || "worker failed t
   worker.postMessage({ type: "pool", ports }, ports);
 })();
 
+const cancels = new Set();         // Rejecters of the requests still waiting
+
 function request(msg, type, timeout = 8000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const done = () => {
+      clearTimeout(timer);
       waiters = waiters.filter((w) => w !== check);
+      cancels.delete(cancel);
+    };
+    const timer = setTimeout(() => {
+      done();
       reject(new Error("No samples from the radio. Replug it and try again."));
     }, timeout);
     const check = (m) => {
       if (m.type !== type) return false;
-      clearTimeout(timer);
+      done();
       resolve(m);
       return true;
     };
+    const cancel = () => { done(); reject(new Error("Cancelled")); };
+    cancels.add(cancel);
     waiters.push(check);
     worker.postMessage(msg);
   });
+}
+
+/**
+ * Starts a new radio session and ends the one before: a scan, tag search or
+ * listen still running stops at its next step. Every async step checks its
+ * session is current before it retunes the radio or messages the worker, so
+ * an old one can never undo what the user just picked.
+ */
+function newSession() {
+  S.session++;
+  S.scanning = S.finding = false;
+  for (const cancel of [...cancels]) cancel();
+  S.endProbe?.();
+  return S.session;
 }
 
 // ======================================================================= storage
@@ -209,28 +240,54 @@ function showConnectError(text) {
   p.hidden = false;
 }
 
+/**
+ * Streams the radio's raw samples to the worker. The worker acknowledges each
+ * buffer once processed; if it falls more than MAX_QUEUED_S behind, buffers
+ * are dropped until it catches up.
+ */
 async function startStream() {
-  S.pending = 0;
+  S.queued = 0;
+  S.lastData = performance.now();
+  const limit = MAX_QUEUED_S * S.fs * (S.dev.format === "rtl" ? 2 : 4);   // uint8 IQ, or uint16 real at 2 fs
   await S.dev.start((buf) => {
-    if (S.pending > MAX_PENDING) { S.dropped++; return; }
-    S.pending++;
+    S.lastData = performance.now();
+    if (S.queued > limit) { S.dropped++; return; }
+    S.queued += buf.byteLength;
     worker.postMessage({ type: "raw", buf }, [buf]);
   }, onDeviceLost);
 }
+
+/** Watchdog: a radio that stops sending samples (a USB hiccup) gets its stream restarted. */
+setInterval(async () => {
+  const d = S.dev;
+  if (!d?.streaming || S.streamBusy || performance.now() - S.lastData < STREAM_STALL_MS) return;
+  S.streamBusy = true;
+  try {
+    await d.stop();
+    if (S.dev !== d) return;
+    await startStream();
+    toast("The radio stopped sending samples, so it was restarted.");
+  } catch (e) {
+    console.error(e);
+    if (S.dev === d) { d.close().catch(() => {}); onDeviceLost(); }
+  } finally {
+    S.streamBusy = false;
+  }
+}, 1000);
 
 function onDeviceLost() {
   if (!S.dev) return;
   S.dev = null;
   S.listen = null;
-  S.abortFind = true;
+  newSession();
   setPill("No radio");
   show("connect");
   showConnectError("The radio stopped responding or was unplugged. Plug it back in and connect again.");
 }
 
 async function disconnect() {
+  newSession();
   worker.postMessage({ type: "stop" });
-  S.abortFind = true;
   const d = S.dev;
   S.dev = null;
   S.demo = false;
@@ -257,17 +314,33 @@ function startDemo() {
 
 /** Scan, then (if enabled) find the tag and listen to the best station. */
 async function autoStart() {
-  await scan();
+  if (!(await scan())) return;
   if (!S.set.auto || !S.stations.length || S.view !== "scan" || S.listen) return;
-  await findTag();
+  if (!(await findTag())) return;
   const best = bestTagStation();
-  if (best && S.view === "scan" && !S.listen && !S.abortFind) listenTo(best);
+  if (best && S.view === "scan" && !S.listen) listenTo(best);
 }
 
-async function applyGain() {
-  if (!S.dev) return;
-  if (S.set.agc) await S.dev.setAgc(true);
-  else await S.dev.setLinearityGain(S.set.gain);
+/**
+ * Sends the gain to the radio. Changes are serialised: while one is being
+ * sent, further ones (a dragged slider) collapse into one with the latest value.
+ */
+let gainTask = null, gainAgain = false;
+function applyGain() {
+  if (gainTask) { gainAgain = true; return gainTask; }
+  gainTask = (async () => {
+    try {
+      do {
+        gainAgain = false;
+        if (!S.dev) return;
+        if (S.set.agc) await S.dev.setAgc(true);
+        else await S.dev.setLinearityGain(S.set.gain);
+      } while (gainAgain);
+    } finally {
+      gainTask = null;
+    }
+  })();
+  return gainTask;
 }
 
 async function refreshConnectButton() {
@@ -278,10 +351,10 @@ async function refreshConnectButton() {
 }
 
 // ======================================================================= scan
+/** Scans the band for stations. False if it was interrupted or failed. */
 async function scan() {
-  if (S.scanning || S.finding) return;
+  const my = newSession();
   S.scanning = true;
-  S.abortScan = false;
   worker.postMessage({ type: "stop" });
   S.listen = null;
   if (S.demo) worker.postMessage({ type: "demo", fs: S.fs });
@@ -299,11 +372,13 @@ async function scan() {
   prog.hidden = false;
   try {
     for (const [i, fc] of centers.entries()) {
+      if (my !== S.session) return false;     // A station was picked, or a new scan began
       setProgress(i / centers.length, `Scanning ${mhz(fc)} MHz…`);
       if (S.dev) await S.dev.setFrequency(fc);
+      if (my !== S.session) return false;
       const r = await request({ type: "scanStep", centerHz: fc, skip: Math.round(0.4 * fs),
         take: Math.round(0.4 * fs), usable }, "scanResult");
-      if (S.abortScan) break;                 // A station was picked mid-scan
+      if (my !== S.session) return false;
       S.band.push({ center: fc, fs, usable, spectrum: r.spectrum });
       for (const s of r.stations) {
         if (s.freq < FM_LOW || s.freq > FM_HIGH) continue;
@@ -318,12 +393,17 @@ async function scan() {
     setProgress(1, `Found ${S.stations.length} station${S.stations.length === 1 ? "" : "s"}`);
     $("#noStations").hidden = S.stations.length > 0;
     setTimeout(() => { if (!S.finding) prog.hidden = true; }, 1500);
+    return true;
   } catch (e) {
+    if (my !== S.session) return false;      // Cancelled by the new session
     prog.hidden = true;
-    if (!S.abortScan) toast(e.message);
+    toast(e.message);
+    return false;
   } finally {
-    S.scanning = false;
-    setBusy(false);
+    if (my === S.session) {
+      S.scanning = false;
+      setBusy(false);
+    }
   }
 }
 
@@ -338,11 +418,32 @@ function setProgress(frac, text) {
   $("#scanProgress .progress-text").textContent = text;
 }
 
+// A button rebuilt between pointer down and up never gets its click, and the
+// station lists are rebuilt often (scan steps, tag results, RDS names). So a
+// rebuild asked for during a press waits until just after the click.
+let pressedAt = 0;
+const deferred = new Set();
+document.addEventListener("pointerdown", () => (pressedAt = performance.now()), true);
+for (const type of ["pointerup", "pointercancel"]) {
+  document.addEventListener(type, () => {
+    pressedAt = 0;
+    setTimeout(() => { for (const f of [...deferred]) { deferred.delete(f); f(); } });
+  }, true);
+}
+
+/** True (and f is queued) if a press is in progress; a press held over 2 s no longer blocks. */
+function deferWhilePressed(f) {
+  if (!pressedAt || performance.now() - pressedAt > 2000) return false;
+  deferred.add(f);
+  return true;
+}
+
 function strengthBars(snr) {
   return [8, 14, 20, 26].filter((t) => snr >= t).length;
 }
 
 function renderStationGrid() {
+  if (deferWhilePressed(renderStationGrid)) return;
   const g = $("#stationGrid");
   g.replaceChildren();
   const best = bestTagStation();
@@ -389,21 +490,24 @@ function bestTagStation() {
   return best;
 }
 
+/** Listens to every station in turn for the tag. False if it was interrupted. */
 async function findTag() {
-  if (S.finding || S.scanning || !S.stations.length) return;
+  if (!S.stations.length) return false;
+  const my = newSession();
   S.finding = true;
-  S.abortFind = false;
   $("#bestBar").hidden = true;
   const wins = planWindows(), L = frameLayout(tagCfg());
   S.stations.forEach((s) => S.tags.set(s.freq, { state: "checking" }));
   renderStationGrid();
   try {
     for (const [i, w] of wins.entries()) {
-      if (S.abortFind) break;
+      if (my !== S.session) return false;     // A station was picked, or a scan began
       setProgress(i / wins.length,
         `Listening for your tag on ${w.stations.map((s) => mhz(s.freq)).join(", ")} MHz (${i + 1} of ${wins.length})…`);
       if (S.dev) await S.dev.setFrequency(w.center);
+      if (my !== S.session) return false;
       const res = await probe(w, (S.set.txPeriod + L.seconds + 1.5) * 1000);
+      if (my !== S.session) return false;
       for (const s of w.stations) {
         const r = res.get(mhz(s.freq));
         S.tags.set(s.freq, r && (r.ok || r.snr > -16) ? { state: "heard", snr: r.snr } : { state: "none" });
@@ -411,11 +515,14 @@ async function findTag() {
       renderStationGrid();
     }
   } finally {
-    worker.postMessage({ type: "stop" });
-    S.finding = false;
-    S.probe = null;
+    for (const [f, t] of S.tags) if (t.state === "checking") S.tags.delete(f);   // Not reached
+    // Only stop the worker if nothing newer (the station the user picked) is using it
+    if (my === S.session) {
+      worker.postMessage({ type: "stop" });
+      S.finding = false;
+      S.probe = S.endProbe = null;
+    }
   }
-  if (S.abortFind) return;
   setProgress(1, "Done");
   setTimeout(() => ($("#scanProgress").hidden = true), 1200);
   const best = bestTagStation(), bar = $("#bestBar");
@@ -426,14 +533,19 @@ async function findTag() {
     ? `Your tag is strongest on ${mhz(best.freq)} MHz${stationName(best.freq) ? ` (${stationName(best.freq)})` : ""}: ${S.tags.get(best.freq).snr.toFixed(1)} dB.`
     : "No tag heard. Check the tag is powered and its settings match (Settings → Tag signal).";
   renderStationGrid();
+  return true;
 }
 
-/** Listens to a window until a frame is found (or timeout); per-station SNR and decode result. */
+/**
+ * Listens to a window until a frame is found (or timeout); per-station SNR and
+ * decode result. A new session ends it at once (S.endProbe).
+ */
 function probe(w, timeout) {
   return new Promise((resolve) => {
     const res = new Map();
     let frames = 0, timer;
-    const finish = () => { clearTimeout(timer); S.probe = null; resolve(res); };
+    const finish = () => { clearTimeout(timer); S.probe = S.endProbe = null; resolve(res); };
+    S.endProbe = finish;
     S.probe = (ev) => {
       for (const st of ev.stations) {
         const prev = res.get(st.label);
@@ -448,28 +560,28 @@ function probe(w, timeout) {
 }
 
 // ======================================================================= listen
+/**
+ * Tunes the main station to the centre and lists every other station that
+ * fits in the captured bandwidth as a possible helper. An RTL-SDR has a DC
+ * spike and its IQ image at the centre, so there the main station sits
+ * RTL_OFFSET above it.
+ */
 function planCapture(main) {
   const half = USABLE * S.fs - CHANNEL_HALF;
-  const others = S.stations.filter((s) => s.freq !== main.freq);
-  const value = (s) => S.tags.get(s.freq)?.state === "heard" ? 1000 + S.tags.get(s.freq).snr : s.snr;
-  let best = null;
-  for (let c = main.freq - half; c <= main.freq + half + 1; c += 25e3) {
-    const inside = others.filter((s) => Math.abs(s.freq - c) <= half)
-      .sort((a, b) => value(b) - value(a)).slice(0, S.set.helpers);
-    const score = inside.length * 10000 + inside.reduce((a, s) => a + value(s), 0) - Math.abs(c - main.freq) / 1e5;
-    if (!best || score > best.score) best = { score, center: Math.round(c / 1e3) * 1e3, helpers: inside };
-  }
-  best.helpers.sort((a, b) => a.freq - b.freq);
-  return best;
+  const center = Math.round((main.freq - (S.dev?.format === "rtl" ? RTL_OFFSET : 0)) / 1e3) * 1e3;
+  const helpers = S.stations.filter((s) => s.freq !== main.freq && Math.abs(s.freq - center) <= half)
+    .sort((a, b) => a.freq - b.freq);
+  return { center, helpers };
 }
 
 function listenTo(main) {
-  if (S.scanning) S.abortScan = true;
-  if (S.finding) S.abortFind = true;
+  newSession();                   // Ends a scan or tag search still running
+  setBusy(false);
+  $("#scanProgress").hidden = true;
   const plan = planCapture(main);
   S.listen = {
     main, center: plan.center,
-    helpers: plan.helpers.map((h) => ({ ...h, on: true })),
+    helpers: plan.helpers.map((h) => ({ ...h, on: false })),   // The user picks the helpers
     results: new Map(), spec: null, gotText: false, packets: [], snrs: [],
     yMin: -100, yMax: -40, nf: null,
   };
@@ -487,14 +599,17 @@ function activeStations() {
 }
 
 async function startListen() {
-  const L = S.listen;
+  const L = S.listen, gen = ++S.listenGen;
   if (!L) return;
   try {
     if (S.dev) await S.dev.setFrequency(L.center);
   } catch (e) {
-    toast(explain(e));
+    if (gen === S.listenGen) toast(explain(e));
     return;
   }
+  if (gen !== S.listenGen || S.listen !== L) return;   // Another station or helper set was picked meanwhile
+  if (S.audio.on) audioOutput();
+  renderAudioButton();
   worker.postMessage({ type: "listen", centerHz: L.center, stations: activeStations().map((s) => ({ freq: s.freq })),
     cfg: tagCfg(), awgn: awgnValue(), audio: S.audio.on, deemph: S.set.deemph * 1e-6 });
   S.audio.t = 0;
@@ -523,6 +638,10 @@ function renderListenHeader() {
   const helpers = L.helpers.filter((h) => h.on);
   helpers.forEach((h) => sub.append(el("span", "chip", label(h, "helper"))));
   if (!L.helpers.length) sub.append(el("span", "muted small", "No other stations fit in the bandwidth"));
+  else if (!helpers.length) {
+    const n = L.helpers.length;
+    sub.append(el("span", "muted small", `${n} more station${n === 1 ? "" : "s"} in the bandwidth: switch on helpers under Stations`));
+  }
   $("#chirpTitle").textContent = `Tag chirps on ${mhz(L.main.freq)} MHz`;
 }
 
@@ -583,6 +702,7 @@ function addPacketRow(ev) {
 }
 
 function renderStationRows() {
+  if (deferWhilePressed(renderStationRows)) return;
   const L = S.listen, ul = $("#stationRows");
   if (!L) return;
   ul.replaceChildren();
@@ -604,6 +724,11 @@ function renderStationRows() {
       t.checked = s.on;
       t.title = "Use this station";
       t.addEventListener("change", () => {
+        if (t.checked && L.helpers.filter((h) => h.on).length >= S.set.helpers) {
+          t.checked = false;
+          toast(`At most ${S.set.helpers} helper stations at once (Settings → Helper stations).`);
+          return;
+        }
         L.helpers.find((h) => h.freq === s.freq).on = t.checked;
         startListen();
       });
@@ -628,7 +753,6 @@ function onDisplay(m) {
 }
 
 function onLoad(m) {
-  S.pending = Math.max(0, S.pending - m.processed);
   const pct = Math.round((m.load + m.stations) * 100);
   $("#statLoad").textContent = `CPU ${pct}% · ${m.threads} thread${m.threads === 1 ? "" : "s"}`;
   if (S.dropped || m.dropped) {
@@ -673,24 +797,42 @@ function exportCsv() {
 }
 
 // ======================================================================= audio
-S.audio = { ctx: null, gain: null, on: false, t: 0 };
+S.audio = { ctx: null, gain: null, on: true, t: 0 };   // On by default: listening starts with the audio
 
-/** Plays the main station's mono audio (50 kHz chunks from the worker). */
-async function toggleAudio() {
+/**
+ * The audio output, created on first use. Browsers keep it suspended until
+ * the user has interacted with the page (e.g. after plug-and-play start), so
+ * it is also resumed on the next click or key press.
+ */
+function audioOutput() {
   const A = S.audio;
-  A.on = !A.on;
-  if (A.on && !A.ctx) {
+  if (!A.ctx) {
     A.ctx = new AudioContext({ sampleRate: 50000, latencyHint: "playback" });
     A.gain = A.ctx.createGain();
     A.gain.gain.value = Number($("#volume").value);
     A.gain.connect(A.ctx.destination);
   }
-  if (A.on) await A.ctx.resume();
+  if (A.ctx.state !== "running") A.ctx.resume().catch(() => {});
+}
+
+for (const type of ["pointerdown", "keydown"]) {
+  document.addEventListener(type, () => { if (S.audio.on && S.audio.ctx?.state === "suspended") S.audio.ctx.resume(); });
+}
+
+function renderAudioButton() {
+  const b = $("#audioBtn");
+  b.setAttribute("aria-pressed", String(S.audio.on));
+  b.querySelector("span").textContent = S.audio.on ? "Stop audio" : "Play audio";
+}
+
+/** Plays the main station's mono audio (50 kHz chunks from the worker). */
+function toggleAudio() {
+  const A = S.audio;
+  A.on = !A.on;
+  if (A.on) audioOutput();
   A.t = 0;
   worker.postMessage({ type: "audio", on: A.on, deemph: S.set.deemph * 1e-6 });
-  const b = $("#audioBtn");
-  b.setAttribute("aria-pressed", String(A.on));
-  b.querySelector("span").textContent = A.on ? "Stop audio" : "Play audio";
+  renderAudioButton();
 }
 
 function playAudio(pcm) {
@@ -1033,8 +1175,10 @@ async function changeRate(rate) {
   save(STORE, S.set);
   if (rate === S.fs) return;
   S.fs = rate;
-  S.abortFind = true;
+  newSession();
+  S.listen = null;
   if (S.dev) {
+    S.streamBusy = true;
     try {
       await S.dev.stop();
       await S.dev.setSampleRate(rate);
@@ -1043,6 +1187,8 @@ async function changeRate(rate) {
     } catch (e) {
       toast(explain(e));
       return;
+    } finally {
+      S.streamBusy = false;
     }
   } else if (S.demo) {
     worker.postMessage({ type: "reset", fs: rate });
@@ -1133,6 +1279,7 @@ $("#scanBtn").addEventListener("click", scan);
 $("#findBtn").addEventListener("click", findTag);
 $("#bestBtn").addEventListener("click", () => { const b = bestTagStation(); if (b) listenTo(b); });
 $("#changeBtn").addEventListener("click", () => {
+  newSession();
   worker.postMessage({ type: "stop" });
   S.listen = null;
   show("scan");
